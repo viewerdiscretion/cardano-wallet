@@ -1076,17 +1076,11 @@ newDBLayer
         ( PersistState s
         , PersistPrivateKey (k 'RootK)
         )
-    => Tracer IO DBLog
-       -- ^ Logging object
-    -> DefaultFieldValues
-       -- ^ Default database field values, used during migration.
-    -> Maybe FilePath
-       -- ^ Path to database file, or Nothing for in-memory database
-    -> TimeInterpreter IO
+    => TimeInterpreter IO
        -- ^ Time interpreter for slot to time conversions
     -> SqliteContext
        -- ^ A (thread-)safe wrapper for query execution.
-    -> IO (SqliteContext, DBLayer IO s k)
+    -> IO (DBLayer IO s k)
 newDBLayer =
     newDBLayerWith @s @k CacheLatestCheckpoint
 
@@ -1095,25 +1089,15 @@ newDBLayerWith
     :: forall s k.
         ( PersistState s
         , PersistPrivateKey (k 'RootK)
-        , WalletKey k
         )
     => CacheBehavior
-    -> Tracer IO DBLog
-    -> DefaultFieldValues
-    -> Maybe FilePath
+       -- ^ Option to disable IORef caching.
     -> TimeInterpreter IO
-       -- ^ Time interpreter for slot to time conversions
+       -- ^ Time interpreter for slot to time conversions.
     -> SqliteContext
        -- ^ A (thread-)safe wrapper for query execution.
-    -> IO (SqliteContext, DBLayer IO s k)
+    -> IO (DBLayer IO s k)
 newDBLayerWith cacheBehavior ti SqliteContext{runQuery} = do
-    ctx@SqliteContext{runQuery} <-
-        either throwIO pure =<<
-        newSqliteContext
-            (migrateManually trace (Proxy @k) defaultFieldValues)
-            migrateAll
-            trace
-            mDatabaseFile
     -- NOTE1
     -- We cache the latest checkpoint for read operation such that we prevent
     -- needless marshalling and unmarshalling with the database. Many handlers
