@@ -52,14 +52,13 @@ import Cardano.DB.Sqlite
     , chunkSize
     , dbChunked
     , dbChunked'
-    , destroyConnectionPool
     , fieldName
     , fieldType
     , handleConstraint
-    , newConnectionPool
     , newInMemorySqliteContext
     , newSqliteContext
     , tableName
+    , withConnectionPool
     )
 import Cardano.DB.Sqlite.Delete
     ( deleteSqliteDatabase, newRefCount, waitForFree, withRef )
@@ -214,7 +213,7 @@ import System.Directory
 import System.FilePath
     ( (</>) )
 import UnliftIO.Exception
-    ( Exception, bracket, throwIO )
+    ( Exception, throwIO )
 import UnliftIO.MVar
     ( modifyMVar, modifyMVar_, newMVar, readMVar )
 
@@ -267,8 +266,7 @@ withDBLayer tr defaultFieldValues mDatabaseDir ti action =
         Just fp -> do
             let manualMigrations = migrateManually tr (Proxy @k) defaultFieldValues
             let autoMigrations   = migrateAll
-            let acquirePool      = newConnectionPool tr fp
-            bracket acquirePool destroyConnectionPool $ \pool -> do
+            withConnectionPool tr fp $ \pool -> do
                 ctx <- newSqliteContext tr pool manualMigrations autoMigrations fp
                 either throwIO (action <=< newDBLayer ti) ctx
 
@@ -328,6 +326,8 @@ newDBFactory tr defaultFieldValues ti = \case
                 -- try to wait for all 'withDatabase' calls to finish before
                 -- deleting database file.
                 let trWait = contramap (MsgWaitingForDatabase widp) tr
+                -- TODO: rather than refcounting, why not keep retrying the
+                -- delete until there are no file busy errors?
                 waitForFree trWait refs wid $ \inUse -> do
                     unless (inUse == 0) $
                         traceWith tr $ MsgRemovingInUse widp inUse
