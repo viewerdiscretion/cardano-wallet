@@ -7,6 +7,8 @@ import Prelude
 
 import Control.Monad.IO.Unlift
     ( MonadUnliftIO (..) )
+import Data.Bifunctor
+    ( first )
 import Data.IORef
     ( IORef, newIORef, readIORef, writeIORef )
 import Data.List
@@ -14,7 +16,7 @@ import Data.List
 import System.Environment
     ( setEnv )
 import System.IO.Silently
-    ( capture_ )
+    ( capture_, silence )
 import Test.Hspec
     ( ActionWith
     , Expectation
@@ -29,7 +31,7 @@ import Test.Hspec
     , shouldContain
     )
 import Test.Hspec.Core.Runner
-    ( defaultConfig, runSpec )
+    ( Summary (..), defaultConfig, runSpec )
 import Test.Hspec.Core.Spec
     ( runIO, sequential )
 import Test.Hspec.Expectations.Lifted
@@ -39,7 +41,7 @@ import Test.Hspec.Extra
 import UnliftIO.Concurrent
     ( threadDelay )
 import UnliftIO.Exception
-    ( bracket )
+    ( bracket, throwString, tryAny )
 import UnliftIO.MVar
     ( MVar, newEmptyMVar, newMVar, putMVar, tryReadMVar, tryTakeMVar )
 
@@ -151,14 +153,6 @@ aroundAllSpec = sequential $ do
             it "provides resource to second test" $ \var ->
                 tryReadMVar @IO var `shouldReturn` Just resourceA
 
-        -- This could work with an adjustment of 'aroundAll' type
-        -- describe "multi" $
-        --     aroundAll (withMVarResource resourceA) $
-        --     aroundAll (withMVarResource resourceB) $ do
-        --        it "provides two resources" $ \a b -> do
-        --            tryTakeMVar a `shouldReturn` Just resourceA
-        --            tryTakeMVar b `shouldReturn` Just resourceB
-
         mvar <- runIO newEmptyMVar
         let withResource = bracket (putMVar mvar ()) (`takeMVarCheck` mvar)
 
@@ -171,3 +165,21 @@ aroundAllSpec = sequential $ do
         describe "prompt release" $
             it "after the spec runs" $
                 tryReadMVar @IO mvar `shouldReturn` Nothing
+
+        describe "exceptions" $ do
+            let trySpec = fmap (first show) . tryAny
+                    . silence . flip runSpec defaultConfig
+            let bombBefore = bracket (throwString "bomb1") (const $ pure ())
+            let bombAfter = bracket (pure ()) (const $ throwString "bomb2")
+
+            it "while allocating resource" $ do
+                a <- trySpec $ aroundAll bombBefore $
+                        it "should never happen" $ const $
+                            False `shouldBe` True
+                a `shouldBe` Right (Summary 1 1)
+
+            it "while releasing resource" $ do
+                b <- trySpec $ aroundAll bombAfter $
+                        it "spec" $ const $
+                            pure @IO ()
+                b `shouldBe` Right (Summary 1 0)
