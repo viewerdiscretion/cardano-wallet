@@ -393,6 +393,7 @@ benchmark db
     , cardano-crypto
     , cardano-wallet-core
     , cardano-wallet-launcher
+    , cardano-wallet-test-utils
     , containers
     , criterion
     , cryptonite
