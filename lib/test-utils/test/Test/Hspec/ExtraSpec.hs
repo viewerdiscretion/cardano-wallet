@@ -1,7 +1,12 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
 module Test.Hspec.ExtraSpec where
 
 import Prelude
 
+import Control.Monad.IO.Unlift
+    ( MonadUnliftIO (..) )
 import Data.IORef
     ( IORef, newIORef, readIORef, writeIORef )
 import Data.List
@@ -25,46 +30,60 @@ import Test.Hspec
     )
 import Test.Hspec.Core.Runner
     ( defaultConfig, runSpec )
+import Test.Hspec.Core.Spec
+    ( runIO, sequential )
+import Test.Hspec.Expectations.Lifted
+    ( shouldReturn )
+import Test.Hspec.Extra
+    ( aroundAll )
 import UnliftIO.Concurrent
     ( threadDelay )
+import UnliftIO.Exception
+    ( bracket )
+import UnliftIO.MVar
+    ( MVar, newEmptyMVar, newMVar, putMVar, tryReadMVar, tryTakeMVar )
 
 import qualified Test.Hspec.Extra as Extra
 
 spec :: Spec
 spec = do
-    describe "Extra.it" $ before_ (setEnv "TESTS_RETRY_FAILED" "y") $ do
-        it "equals Hspec.it on success" $ do
-            let test = 1 `shouldBe` (1::Int)
-            test `shouldMatchHSpecIt` test
+    itSpec
+    aroundAllSpec
 
-        it "equals Hspec.it on failure" $ do
-            let test = (2+2) `shouldBe` (5::Int)
-            test `shouldMatchHSpecIt` test
+itSpec :: Spec
+itSpec = describe "Extra.it" $ before_ (setEnv "TESTS_RETRY_FAILED" "y") $ do
+    it "equals Hspec.it on success" $ do
+        let test = 1 `shouldBe` (1::Int)
+        test `shouldMatchHSpecIt` test
 
-        describe "when first attempt fails due to flakiness" $ do
-            describe "when the retry succeeds" $ do
-                let flaky = expectationFailure "flaky test"
-                let succeed = 1 `shouldBe` (1 :: Int)
-                it "succeeds" $ do
-                    outcomes <- newIORef [flaky, succeed]
-                    (dynamically outcomes) `shouldMatchHSpecIt` succeed
+    it "equals Hspec.it on failure" $ do
+        let test = (2+2) `shouldBe` (5::Int)
+        test `shouldMatchHSpecIt` test
 
-            describe "when the retry also fails" $ do
-                -- Some tests use limited resources and cannot be retried.
-                -- On failures, we should make sure to show the first failure
-                -- which is the interesting one.
-                it "fails with the first error" $ do
-                    let failure = expectationFailure "failure"
-                    let noRetry = expectationFailure "test can't be retried"
-                    outcomes <- newIORef [failure, noRetry]
-                    (dynamically outcomes) `shouldMatchHSpecIt` failure
-        it "can time out" $ do
-            let micro = (1000*1000 *)
-            let timeout = do
-                    threadDelay (micro 10)
-                    expectationFailure "should have timed out"
-            res <- run (Extra.itWithCustomTimeout 2) timeout
-            res `shouldContain` "timed out in 2 seconds"
+    describe "when first attempt fails due to flakiness" $ do
+        describe "when the retry succeeds" $ do
+            let flaky = expectationFailure "flaky test"
+            let succeed = 1 `shouldBe` (1 :: Int)
+            it "succeeds" $ do
+                outcomes <- newIORef [flaky, succeed]
+                (dynamically outcomes) `shouldMatchHSpecIt` succeed
+
+        describe "when the retry also fails" $ do
+            -- Some tests use limited resources and cannot be retried.
+            -- On failures, we should make sure to show the first failure
+            -- which is the interesting one.
+            it "fails with the first error" $ do
+                let failure = expectationFailure "failure"
+                let noRetry = expectationFailure "test can't be retried"
+                outcomes <- newIORef [failure, noRetry]
+                (dynamically outcomes) `shouldMatchHSpecIt` failure
+    it "can time out" $ do
+        let micro = (1000*1000 *)
+        let timeout = do
+                threadDelay (micro 10)
+                expectationFailure "should have timed out"
+        res <- run (Extra.itWithCustomTimeout 2) timeout
+        res `shouldContain` "timed out in 2 seconds"
 
   where
     -- | lhs `shouldMatchHSpecIt` rhs asserts that the output of running
@@ -104,3 +123,51 @@ spec = do
         outcome:rest <- readIORef outcomes
         writeIORef outcomes rest
         outcome
+
+aroundAllSpec :: Spec
+aroundAllSpec = sequential $ do
+    let withMockResource :: MonadUnliftIO m => a -> (a -> m r) -> m r
+        withMockResource a = bracket (pure a) (const $ pure ())
+
+        withMVarResource :: (Show a, Eq a, MonadUnliftIO m) => a -> (MVar a -> m r) -> m r
+        withMVarResource a = bracket (newMVar a) (takeMVarCheck a)
+
+        takeMVarCheck :: (Show a, Eq a, MonadUnliftIO m) => a -> MVar a -> m ()
+        takeMVarCheck a var = tryTakeMVar var `shouldReturn` Just a
+
+        resourceA = 1 :: Int
+
+    describe "Extra.aroundAll" $ do
+        describe "trivial" $ aroundAll (withMockResource resourceA) $ do
+            it "provides resource to first test"
+                (`shouldBe` resourceA)
+            it "provides resource to second test"
+                (`shouldBe` resourceA)
+
+        describe "basic" $ aroundAll (withMVarResource resourceA) $ do
+            it "provides resource to first test" $ \var ->
+               tryReadMVar @IO var `shouldReturn` Just resourceA
+
+            it "provides resource to second test" $ \var ->
+                tryReadMVar @IO var `shouldReturn` Just resourceA
+
+        -- This could work with an adjustment of 'aroundAll' type
+        -- describe "multi" $
+        --     aroundAll (withMVarResource resourceA) $
+        --     aroundAll (withMVarResource resourceB) $ do
+        --        it "provides two resources" $ \a b -> do
+        --            tryTakeMVar a `shouldReturn` Just resourceA
+        --            tryTakeMVar b `shouldReturn` Just resourceB
+
+        mvar <- runIO newEmptyMVar
+        let withResource = bracket (putMVar mvar ()) (`takeMVarCheck` mvar)
+
+        describe "lazy allocation" $ aroundAll withResource $ do
+            before <- runIO $ tryReadMVar mvar
+            it "not before the spec runs" $ \_ -> do
+                before `shouldBe` Nothing
+                tryReadMVar mvar `shouldReturn` Just ()
+
+        describe "prompt release" $
+            it "after the spec runs" $
+                tryReadMVar @IO mvar `shouldReturn` Nothing
